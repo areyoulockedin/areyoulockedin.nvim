@@ -1,16 +1,27 @@
 local config = require("areyoulockedin.config")
-
 local Job = require("plenary.job")
 
-local function send_heartbeat(language, time_spent_minutes)
+-- Helper: create timer
+local function create_timer()
+	return vim.uv and vim.uv.new_timer() or vim.loop.new_timer()
+end
+
+-- Func: Send Heartbeat Request
+local function send_heartbeat(language, total_time_seconds)
 	if not config.session_key then
 		print("AreYouLockedIn: Session key not set. Use :AYLISetSessionKey to set it.")
-		return
+		return false -- Indicate failure to proceed
 	end
 
-	if time_spent_minutes <= 0 then
-		return
+	if total_time_seconds <= 0 then
+		return true -- Nothing to send, technically success
 	end
+
+	if total_time_seconds < 10 then -- Less than 10 seconds
+		return true -- Consider it success, reset local state later if needed
+	end
+
+	local time_spent_minutes = math.floor((total_time_seconds / 60) * 100) / 100 -- Round down to 2 decimal places
 
 	local body = vim.json.encode({
 		timestamp = os.date("!%Y-%m-%dT%TZ"),
@@ -19,7 +30,7 @@ local function send_heartbeat(language, time_spent_minutes)
 		timeSpent = time_spent_minutes,
 	})
 
-	print("AreYouLockedIn: Sending heartbeat.")
+	local success = false -- Flag to track outcome
 
 	Job:new({
 		command = "curl",
@@ -30,94 +41,141 @@ local function send_heartbeat(language, time_spent_minutes)
 			"Content-Type: application/json",
 			"-d",
 			body,
-			config.BASE_URL .. config.HEARTBEAT, -- Use config values
+			config.BASE_URL .. config.HEARTBEAT,
 		},
+		-- Use on_exit_sync or manage async carefully if needed later
 		on_exit = vim.schedule_wrap(function(j, return_val)
 			local current_time = vim.fn.localtime()
 			if return_val == 0 then
 				-- SUCCESS: Update state in the config table
 				config.last_heartbeat_time = current_time
-				config.activity_start_time = current_time -- Reset for next interval
+				-- Reset accumulator AFTER successful send
+				config.accumulated_time_seconds = 0
+				-- We reset activity_chunk_start_time elsewhere (on change/focus)
 				print("AreYouLockedIn: Heartbeat sent successfully.")
+				success = true
 			else
-				-- FAILURE: Don't update state
+				-- FAILURE: Don't update state (accumulator keeps the time)
 				print("AreYouLockedIn: Failed to send heartbeat. Status: " .. return_val)
-				print(table.concat(j:stderr_result(), "\n"))
-				-- Keep config.activity_start_time as it was
+				local stderr = j:stderr_result()
+				if stderr and #stderr > 0 then
+					print(table.concat(stderr, "\n"))
+				else
+					print("AreYouLockedIn: (No stderr output from curl)")
+				end
+				-- Keep config.accumulated_time_seconds as it was
+				success = false
 			end
 		end),
 	}):start()
+	return true -- Indicate the sending process was initiated
 end
 
-local function trigger_heartbeat()
-	local language = vim.bo.filetype
-	local current_time = vim.fn.localtime()
-	local time_spent_seconds = 0
-
-	-- Access state from config table
-	if config.activity_start_time then
-		time_spent_seconds = current_time - config.activity_start_time
-	end
-
-	local time_spent_minutes = time_spent_seconds / 60
-
-	send_heartbeat(language, time_spent_minutes)
-end
-
-local function on_save()
-	if config.typing_timer and config.typing_timer:is_active() then
-		config.typing_timer:stop()
-		config.typing_timer:close() -- Close might be needed depending on timer implementation details
-	end
-	config.typing_timer = nil -- Ensure handle is cleared in config
-
-	trigger_heartbeat()
-end
-
-local function create_timer()
-	return vim.uv and vim.uv.new_timer() or vim.loop.new_timer()
-end
-
-local function reset_inactivity_timer()
+-- Stops the current timer if active
+local function stop_timer()
 	if config.typing_timer then
 		if config.typing_timer:is_active() then
 			config.typing_timer:stop()
-			config.typing_timer:close()
 		end
+		-- Ensure timer is closed to release resources
+		pcall(function()
+			config.typing_timer:close()
+		end) -- Wrap close in pcall
 		config.typing_timer = nil
+	end
+end
+
+-- Calculates elapsed time in the current chunk and adds to accumulator
+local function accumulate_current_chunk()
+	if config.activity_chunk_start_time then
+		local current_time = vim.fn.localtime()
+		local elapsed = current_time - config.activity_chunk_start_time
+		if elapsed > 0 then
+			config.accumulated_time_seconds = config.accumulated_time_seconds + elapsed
+		end
+		-- Reset chunk start time as this chunk is now accounted for
+		config.activity_chunk_start_time = nil
+	end
+end
+
+-- Function: trigger heartbeat logic (called by timer, save, focus loss, exit)
+local function trigger_heartbeat_logic()
+	stop_timer()
+
+	accumulate_current_chunk()
+
+	local language = vim.bo.filetype or "unknown" -- Use buffer filetype or a default
+	send_heartbeat(language, config.accumulated_time_seconds)
+end
+
+-- Function: Resets and starts the inactivity timer
+local function reset_inactivity_timer()
+	stop_timer() -- Stop previous timer first
+
+	-- Don't start timer if not focused
+	if not config.is_focused then
+		return
 	end
 
 	config.typing_timer = create_timer()
 	config.typing_timer:start(
 		config.HEARTBEAT_INTERVAL,
-		0,
-		vim.schedule_wrap(function() -- Use config interval
-			if not config.typing_timer or not config.typing_timer:is_active() then
-				return
-			end
-
-			print("AreYouLockedIn: Sending heartbeat.")
-			trigger_heartbeat()
-
-			-- Clean up the timer that just fired (access via config)
-			if config.typing_timer and config.typing_timer:is_active() then
-				config.typing_timer:stop()
-				config.typing_timer:close()
-			end
-			config.typing_timer = nil -- Clear handle in config
+		0, -- Don't repeat
+		vim.schedule_wrap(function()
+			-- Timer fired due to inactivity
+			print("AreYouLockedIn: Inactivity detected.")
+			trigger_heartbeat_logic()
+			-- Timer cleans itself up mostly, but ensure handle is nil
+			config.typing_timer = nil
 		end)
 	)
 end
 
-local function on_change()
-	local current_time = vim.fn.localtime()
-
-	-- Use config for activity start time
-	if not config.activity_start_time then
-		config.activity_start_time = current_time
+-- Called on TextChanged, TextChangedI etc.
+local function on_activity()
+	-- Ignore activity if not focused
+	if not config.is_focused then
+		return
 	end
 
+	local current_time = vim.fn.localtime()
+
+	-- If this is the first activity in a focused chunk, record start time
+	if not config.activity_chunk_start_time then
+		config.activity_chunk_start_time = current_time
+	end
+
+	-- Reset the inactivity timer every time there's activity
 	reset_inactivity_timer()
+end
+
+-- Called on BufWritePost
+local function on_save()
+	-- Saving is a deliberate action, implies focus or final action
+	trigger_heartbeat_logic()
+end
+
+-- Called on FocusGained
+local function on_focus_gained()
+	if not config.is_focused then
+		config.is_focused = true
+		-- Don't start timer or tracking yet, wait for actual activity (on_activity)
+		-- Reset chunk start time, a new focused period begins
+		config.activity_chunk_start_time = nil
+	end
+end
+
+-- Called on FocusLost
+local function on_focus_lost()
+	if config.is_focused then
+		config.is_focused = false
+
+		-- Stop the inactivity timer as we are no longer active
+		stop_timer()
+
+		-- Accumulate time for the chunk that just ended due to focus loss
+		accumulate_current_chunk()
+	end
 end
 
 local M = {}
@@ -125,67 +183,92 @@ local M = {}
 function M.set_session_key()
 	vim.ui.input({
 		prompt = "Enter session key: ",
-		default = config.session_key or "", -- Use config value
+		default = config.session_key or "",
 	}, function(input)
 		if input and input ~= "" then
-			config.session_key = input
-			print("AreYouLockedIn: Session key set.")
-			-- Reset state related to the key
-			config.activity_start_time = vim.fn.localtime() -- Start tracking now
-			config.last_heartbeat_time = nil -- Reset last success time
+			if input ~= config.session_key then
+				print("AreYouLockedIn: Session key set/changed.")
+				config.session_key = input
+				-- Reset state completely when key changes
+				config.accumulated_time_seconds = 0
+				config.activity_chunk_start_time = nil
+				config.last_heartbeat_time = nil
+				stop_timer()
+				-- Assume focused after setting key interactively
+				config.is_focused = true
+			else
+				print("AreYouLockedIn: Session key unchanged.")
+			end
 		else
 			print("AreYouLockedIn: Session key not set.")
+			config.session_key = nil
+			config.accumulated_time_seconds = 0
 		end
 	end)
 end
 
 function M.setup(opts)
-	config = vim.tbl_deep_extend("force", config, opts)
-	-- Ensure state variables exist in the config table after merging
+	-- Merge user options with defaults
+	config = vim.tbl_deep_extend("force", config, opts or {})
+
+	-- Initialize state variables in the config table if they don't exist
 	config.last_heartbeat_time = config.last_heartbeat_time or nil
-	config.typing_timer = config.typing_timer or nil -- Should generally start as nil anyway
-	config.activity_start_time = config.activity_start_time or nil -- Will be set on first activity or key load
+	config.typing_timer = config.typing_timer or nil -- Timer handle
+	config.activity_chunk_start_time = config.activity_chunk_start_time or nil -- Start of current active period
+	config.accumulated_time_seconds = config.accumulated_time_seconds or 0 -- Time waiting to be sent
+	config.is_focused = config.is_focused == nil and true or config.is_focused -- Assume focused initially if not set
 
-	-- Initialize activity start time if a key is present and it hasn't been set
-	if config.session_key and not config.activity_start_time then
-		config.activity_start_time = vim.fn.localtime()
-	end
+	-- Define Augroups safely
+	local group_name = "AreYouLockedInActivity"
+	vim.api.nvim_create_augroup(group_name, { clear = true })
 
-	-- Create Augroup
-	local group = vim.api.nvim_create_augroup("AreYouLockedIn", { clear = true })
-
+	-- Autocommands
 	vim.api.nvim_create_autocmd("BufWritePost", {
 		pattern = "*",
-		group = group,
+		group = group_name,
 		callback = on_save,
 	})
 
-	vim.api.nvim_create_autocmd({ "TextChanged" }, {
+	-- Use a broader set of events to detect activity
+	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
 		pattern = "*",
-		group = group,
-		callback = on_change,
+		group = group_name,
+		callback = on_activity,
 	})
 
+	vim.api.nvim_create_autocmd("FocusGained", {
+		pattern = "*",
+		group = group_name,
+		callback = on_focus_gained,
+	})
+
+	vim.api.nvim_create_autocmd("FocusLost", {
+		pattern = "*",
+		group = group_name,
+		callback = on_focus_lost,
+	})
+
+	-- Cleanup on exit
+	local cleanup_group_name = "AreYouLockedInCleanup"
+	vim.api.nvim_create_augroup(cleanup_group_name, { clear = true })
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		pattern = "*",
+		group = cleanup_group_name,
+		callback = function()
+			print("AreYouLockedIn: VimLeavePre triggered.")
+			-- Ensure any remaining time is accounted for and sent
+			trigger_heartbeat_logic()
+			-- Stop timer explicitly just in case (should be done by trigger_heartbeat_logic)
+			stop_timer()
+		end,
+	})
+
+	-- User Command
 	vim.api.nvim_create_user_command("AYLISetSessionKey", M.set_session_key, {})
 
-	print("AreYouLockedIn: Setup complete. Inactivity timeout: " .. (config.HEARTBEAT_INTERVAL / 1000) .. "s.")
 	if not config.session_key then
-		print("AreYouLockedIn: Session key not loaded. Use :AYLISetSessionKey")
+		print("AreYouLockedIn: Session key not set. Use :AYLISetSessionKey")
 	end
 end
-
-vim.api.nvim_create_autocmd("VimLeavePre", {
-	pattern = "*",
-	group = vim.api.nvim_create_augroup("AreYouLockedInCleanup", { clear = true }),
-	callback = function()
-		if config.typing_timer and config.typing_timer:is_active() then
-			pcall(function()
-				config.typing_timer:stop()
-				config.typing_timer:close()
-			end) -- Wrap in pcall for safety
-			config.typing_timer = nil
-		end
-	end,
-})
 
 return M
