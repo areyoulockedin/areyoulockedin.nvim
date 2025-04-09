@@ -133,20 +133,32 @@ end
 
 -- Called on TextChanged, TextChangedI etc.
 local function on_activity()
-	-- Ignore activity if not focused
 	if not config.is_focused then
 		return
 	end
 
 	local current_time = vim.fn.localtime()
+	local heartbeat_interval_seconds = config.HEARTBEAT_INTERVAL / 1000
 
-	-- If this is the first activity in a focused chunk, record start time
 	if not config.activity_chunk_start_time then
 		config.activity_chunk_start_time = current_time
+		-- Start the inactivity timer to catch when activity *stops*
+		reset_inactivity_timer()
+        -- No duration check needed yet, just started
+		return -- Exit after starting the chunk and timer
 	end
 
-	-- Reset the inactivity timer every time there's activity
-	reset_inactivity_timer()
+	local duration_seconds = current_time - config.activity_chunk_start_time
+
+	if duration_seconds >= heartbeat_interval_seconds then
+		trigger_heartbeat_logic()
+
+		config.activity_chunk_start_time = current_time
+		reset_inactivity_timer()
+
+	else
+		reset_inactivity_timer()
+	end
 end
 
 -- Called on BufWritePost

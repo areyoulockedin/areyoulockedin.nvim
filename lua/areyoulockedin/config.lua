@@ -1,7 +1,7 @@
 local default_config = {
 	BASE_URL = "https://areyoulocked.in",
 	HEARTBEAT = "/api/time",
-	HEARTBEAT_INTERVAL = 2 * 60 * 1000, -- 2 minutes in milliseconds
+	HEARTBEAT_INTERVAL = 5 * 60 * 1000, -- 5 minutes in milliseconds
 
 	-- User specific
 	session_key = nil,
