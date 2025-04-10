@@ -7,7 +7,7 @@ local function create_timer()
 end
 
 -- Func: Send Heartbeat Request
-local function send_heartbeat(language, total_time_seconds)
+local function send_heartbeat(file_ext, total_time_seconds)
 	if not config.session_key then
 		print("AreYouLockedIn: Session key not set. Use :AYLISetSessionKey to set it.")
 		return false -- Indicate failure to proceed
@@ -26,7 +26,7 @@ local function send_heartbeat(language, total_time_seconds)
 	local body = vim.json.encode({
 		timestamp = os.date("!%Y-%m-%dT%TZ"),
 		sessionKey = config.session_key,
-		language = language,
+		extension = file_ext,
 		timeSpent = time_spent_minutes,
 	})
 
@@ -104,8 +104,10 @@ local function trigger_heartbeat_logic()
 
 	accumulate_current_chunk()
 
-	local language = vim.bo.filetype or "unknown" -- Use buffer filetype or a default
-	send_heartbeat(language, config.accumulated_time_seconds)
+	local file_ext = vim.fn.expand("%:e") -- Use buffer filetype or a default
+  if file_ext and file_ext ~= "" then
+    send_heartbeat(file_ext, config.accumulated_time_seconds)
+  end
 end
 
 -- Function: Resets and starts the inactivity timer
@@ -119,11 +121,10 @@ local function reset_inactivity_timer()
 
 	config.typing_timer = create_timer()
 	config.typing_timer:start(
-		config.HEARTBEAT_INTERVAL,
+		config.HEARTBEAT_INTERVAL / 5,
 		0, -- Don't repeat
 		vim.schedule_wrap(function()
 			-- Timer fired due to inactivity
-			print("AreYouLockedIn: Inactivity detected.")
 			trigger_heartbeat_logic()
 			-- Timer cleans itself up mostly, but ensure handle is nil
 			config.typing_timer = nil
