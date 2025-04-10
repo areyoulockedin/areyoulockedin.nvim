@@ -101,13 +101,27 @@ end
 -- Function: trigger heartbeat logic (called by timer, save, focus loss, exit)
 local function trigger_heartbeat_logic()
 	stop_timer()
-
 	accumulate_current_chunk()
 
-	local file_ext = vim.fn.expand("%:e") -- Use buffer filetype or a default
-  if file_ext and file_ext ~= "" then
-    send_heartbeat(file_ext, config.accumulated_time_seconds)
-  end
+	local file_ext = nil
+	local expand_ext = vim.fn.expand('%:e')
+
+	if expand_ext and expand_ext ~= "" and expand_ext:lower() ~= "undefined" then
+		file_ext = expand_ext
+	else
+		local current_buf_name = vim.api.nvim_buf_get_name(0)
+		if current_buf_name and current_buf_name ~= "" then
+			local match = string.match(current_buf_name, "%.([^.]+)$")
+			if match then
+				file_ext = match
+			end
+		end
+	end
+
+	if file_ext and file_ext ~= "" and file_ext ~= nil then
+		file_ext = file_ext:lower()
+		send_heartbeat(file_ext, config.accumulated_time_seconds)
+	end
 end
 
 -- Function: Resets and starts the inactivity timer
