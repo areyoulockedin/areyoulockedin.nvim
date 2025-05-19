@@ -21,14 +21,6 @@ local function process_heartbeat_result(job_object_or_nil, return_val, is_job_ob
 		return true
 	else
 		print("AreYouLockedIn: Failed to send heartbeat.")
-		if is_job_object_provided and job_object_or_nil then
-			local stderr = job_object_or_nil:stderr_result()
-			if stderr and #stderr > 0 then
-				for _, line in ipairs(stderr) do
-					print(line)
-				end
-			end
-		end
 		return false
 	end
 end

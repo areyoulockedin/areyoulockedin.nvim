@@ -1,6 +1,9 @@
 # areyoulockedin.nvim
+areyoulocked.in is a coding activity tracker. this neovim extension keeps track of the time you spend coding and puts you on the leaderboard at areyoulocked.in
 
-lazy (wip):
+Use `:AYLISetSessionKey` to set your session key.
+
+lazy:
 
 ```lua
 return {
