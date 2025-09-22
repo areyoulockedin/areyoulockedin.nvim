@@ -7,7 +7,7 @@ lazy:
 
 ```lua
 return {
-  "voltycodes/areyoulockedin.nvim",
+  "areyoulockedin/areyoulockedin.nvim",
   dependencies = { "nvim-lua/plenary.nvim" },
   event = "VeryLazy",
   config = function()
